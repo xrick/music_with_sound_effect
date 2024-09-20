@@ -4,6 +4,17 @@
 #include <stdlib.h>
 #include <time.h>
 
+#define SAMPLE_RATE 44100
+#define CHANNELS 1
+
+#define PI 3.14159265358979323846
+// #define FORMAT ma_format_s16
+// VHS distortion parameters
+#define FLUTTER_RATE 5.0f
+#define FLUTTER_DEPTH 0.003f
+#define NOISE_LEVEL 0.005f
+#define WOW_RATE 0.5f
+#define WOW_DEPTH 0.002f
 void apply_vhs_effect(float* samples, ma_uint32 frameCount) {
     for (ma_uint32 i = 0; i < frameCount; i++) {
         // Introduce noise
@@ -22,11 +33,40 @@ void apply_vhs_effect(float* samples, ma_uint32 frameCount) {
     }
 }
 
+void apply_vhs_distortion(float* buffer, ma_uint64 frameCount, ma_uint32 channels, ma_uint32 sampleRate) {
+    static float time = 0.0f;
+    float timeStep = 1.0f / sampleRate;
+
+    for (ma_uint64 i = 0; i < frameCount * channels; i += channels) {
+        // Apply flutter effect
+        float flutter = sinf(2.0f * PI * FLUTTER_RATE * time) * FLUTTER_DEPTH;
+
+        // Apply wow effect
+        float wow = sinf(2.0f * PI * WOW_RATE * time) * WOW_DEPTH;
+
+        // Combine flutter and wow
+        float distortion = 1.0f + flutter + wow;
+
+        // Apply distortion and add noise
+        for (ma_uint32 c = 0; c < channels; c++) {
+            float noise = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * NOISE_LEVEL;
+            buffer[i + c] = buffer[i + c] * distortion + noise;
+            // Clamp the output to avoid overflow
+            if (buffer[i + c] > 1.0f) buffer[i + c] = 1.0f;
+            if (buffer[i + c] < -1.0f) buffer[i + c] = -1.0f;
+        }
+
+        time += timeStep;
+    }
+}
+
 int main(int argc, char** argv) {
     ma_result result;
     ma_decoder decoder;
     ma_encoder encoder;
     ma_uint64 totalFrames;
+    ma_uint64 buffLength;
+
     float* outputSamples;
     
     if (argc < 3) {
@@ -44,7 +84,7 @@ int main(int argc, char** argv) {
     }
 
     // Get total frame count
-    totalFrames = ma_decoder_get_length_in_pcm_frames(&decoder);
+    totalFrames = ma_decoder_get_length_in_pcm_frames(&decoder, &buffLength);
     
     // Allocate memory for output samples
     outputSamples = (float*)malloc(totalFrames * decoder.outputChannels * sizeof(float));
@@ -55,22 +95,32 @@ int main(int argc, char** argv) {
     }
 
     // Read PCM frames from the decoder
-    ma_uint64 framesRead = ma_decoder_read_pcm_frames(&decoder, outputSamples, totalFrames, NULL);
-    
-    // Apply VHS effect to the output samples
-    apply_vhs_effect(outputSamples, framesRead * decoder.outputChannels);
-
+   
     // Initialize encoder for output WAV file
-    result = ma_encoder_init_file(argv[2], ma_encoding_format_wav, 1, 44100, NULL, &encoder);
+    ma_encoder_config config = ma_encoder_config_init(ma_encoding_format_wav, decoder.outputFormat, decoder.outputChannels, decoder.outputSampleRate);
+    result = ma_encoder_init_file(argv[2], &config, &encoder);
     if (result != MA_SUCCESS) {
         printf("Failed to initialize encoder: %d\n", result);
         free(outputSamples);
         ma_decoder_uninit(&decoder);
         return -4;
     }
+     while(1){
 
-    // Write modified samples to the output WAV file
-    ma_encoder_write_pcm_frames(&encoder, outputSamples, framesRead);
+        ma_uint64 framesRead = ma_decoder_read_pcm_frames(&decoder, outputSamples, totalFrames, NULL);
+        if (framesRead == 0) break;  // End of file
+        // apply_vhs_distortion(outputSamples, totalFrames, decoder.outputChannels, decoder.outputSampleRate);
+        // Apply VHS effect to the output samples
+        apply_vhs_effect(outputSamples, framesRead * decoder.outputChannels);
+        // Write the processed audio frames to the output file
+        // Write modified samples to the output WAV file
+        // ma_encoder_write_pcm_frames(&encoder, pPCMFramesToWrite, framesToWrite, &framesWritten);
+        // ma_encoder_write_pcm_frames(&encoder, pFrameBuffer, framesRead, NULL);
+        ma_encoder_write_pcm_frames(&encoder, outputSamples, framesRead, NULL); 
+
+    }
+    
+     
 
     // Clean up resources
     ma_encoder_uninit(&encoder);
